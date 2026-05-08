@@ -1,27 +1,20 @@
-From ea166aadb1647e6d936f6f47609fa368ac0e4fef Mon Sep 17 00:00:00 2001
+From 2156568b77ec07f4ce8cd62cbab465af1a932193 Mon Sep 17 00:00:00 2001
 From: turtton <top.gear7509@turtton.net>
-Date: Fri, 8 May 2026 21:27:33 +0900
-Subject: [PATCH] feat: add OpenSubSonic library integration with album view
- and pre-caching
+Date: Fri, 8 May 2026 21:42:32 +0900
+Subject: [PATCH] feat: add OpenSubSonic library integration with album view, pre-caching, and zero-size guard
 
 ---
- CMakeLists.txt                                |   3 +
- src/library/library.cpp                       |   7 +
- .../opensubsonic/opensubsonicapiclient.cpp    | 323 +++++++++++
- .../opensubsonic/opensubsonicapiclient.h      | 107 ++++
- .../opensubsonic/opensubsonicfeature.cpp      | 536 ++++++++++++++++++
- .../opensubsonic/opensubsonicfeature.h        |  71 +++
- .../opensubsonic/opensubsonictrackmodel.cpp   |  98 ++++
- .../opensubsonic/opensubsonictrackmodel.h     |  35 ++
- src/preferences/dialog/dlgpreflibrary.cpp     |  23 +
- src/preferences/dialog/dlgpreflibrarydlg.ui   |  74 ++-
- 10 files changed, 1276 insertions(+), 1 deletion(-)
- create mode 100644 src/library/opensubsonic/opensubsonicapiclient.cpp
- create mode 100644 src/library/opensubsonic/opensubsonicapiclient.h
- create mode 100644 src/library/opensubsonic/opensubsonicfeature.cpp
- create mode 100644 src/library/opensubsonic/opensubsonicfeature.h
- create mode 100644 src/library/opensubsonic/opensubsonictrackmodel.cpp
- create mode 100644 src/library/opensubsonic/opensubsonictrackmodel.h
+ CMakeLists.txt                                     |   3 +
+ src/library/library.cpp                            |   7 +
+ src/library/opensubsonic/opensubsonicapiclient.cpp | 323 ++++++++++++
+ src/library/opensubsonic/opensubsonicapiclient.h   | 107 ++++
+ src/library/opensubsonic/opensubsonicfeature.cpp   | 544 +++++++++++++++++++++
+ src/library/opensubsonic/opensubsonicfeature.h     |  71 +++
+ .../opensubsonic/opensubsonictrackmodel.cpp        | 110 +++++
+ src/library/opensubsonic/opensubsonictrackmodel.h  |  35 ++
+ src/preferences/dialog/dlgpreflibrary.cpp          |  23 +
+ src/preferences/dialog/dlgpreflibrarydlg.ui        |  74 ++-
+ 10 files changed, 1296 insertions(+), 1 deletion(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 95eb1c8..9476327 100644
@@ -506,10 +499,10 @@ index 0000000..bba2301
 +} // namespace mixxx
 diff --git a/src/library/opensubsonic/opensubsonicfeature.cpp b/src/library/opensubsonic/opensubsonicfeature.cpp
 new file mode 100644
-index 0000000..73c51f1
+index 0000000..77b81fb
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicfeature.cpp
-@@ -0,0 +1,536 @@
+@@ -0,0 +1,544 @@
 +#include "library/opensubsonic/opensubsonicfeature.h"
 +
 +#include <QDir>
@@ -1019,7 +1012,7 @@ index 0000000..73c51f1
 +                QStringLiteral("mp3"));
 +        const QString path = cachePath(songId, suffix);
 +
-+        if (QFileInfo::exists(path)) {
++        if (QFileInfo::exists(path) && QFileInfo(path).size() > 0) {
 +            continue;
 +        }
 +
@@ -1029,12 +1022,20 @@ index 0000000..73c51f1
 +        connect(pReply, &QNetworkReply::finished, this, [pReply, path]() {
 +            pReply->deleteLater();
 +            if (pReply->error() != QNetworkReply::NoError) {
++                QFile::remove(path);
++                return;
++            }
++            const QByteArray data = pReply->readAll();
++            if (data.isEmpty()) {
 +                return;
 +            }
 +            QFile file(path);
 +            if (file.open(QIODevice::WriteOnly)) {
-+                file.write(pReply->readAll());
++                file.write(data);
 +                file.close();
++                if (QFileInfo(path).size() == 0) {
++                    QFile::remove(path);
++                }
 +            }
 +        });
 +    }
@@ -1125,10 +1126,10 @@ index 0000000..ea9b21d
 +};
 diff --git a/src/library/opensubsonic/opensubsonictrackmodel.cpp b/src/library/opensubsonic/opensubsonictrackmodel.cpp
 new file mode 100644
-index 0000000..adef5c1
+index 0000000..6c4ea19
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonictrackmodel.cpp
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,110 @@
 +#include "library/opensubsonic/opensubsonictrackmodel.h"
 +
 +#include <QDir>
@@ -1169,8 +1170,11 @@ index 0000000..adef5c1
 +        return TrackPointer();
 +    }
 +
-+    // If the file doesn't exist locally, download from server
-+    if (!QFileInfo::exists(location)) {
++    QFileInfo fileInfo(location);
++    if (!fileInfo.exists() || fileInfo.size() == 0) {
++        if (fileInfo.exists() && fileInfo.size() == 0) {
++            QFile::remove(location);
++        }
 +        if (!ensureCached(location)) {
 +            kLogger.warning() << "Failed to download track to cache:" << location;
 +            return TrackPointer();
@@ -1221,11 +1225,20 @@ index 0000000..adef5c1
 +        return false;
 +    }
 +
-+    file.write(pReply->readAll());
-+    file.close();
++    const QByteArray data = pReply->readAll();
 +    pReply->deleteLater();
 +
-+    return QFileInfo::exists(location);
++    if (data.isEmpty()) {
++        kLogger.warning() << "Downloaded empty data for:" << location;
++        file.close();
++        QFile::remove(location);
++        return false;
++    }
++
++    file.write(data);
++    file.close();
++
++    return QFileInfo(location).size() > 0;
 +}
 diff --git a/src/library/opensubsonic/opensubsonictrackmodel.h b/src/library/opensubsonic/opensubsonictrackmodel.h
 new file mode 100644
@@ -1422,6 +1435,6 @@ index cb943bc..2faaf8a 100644
    <tabstop>radioButton_cover_art_fetcher_highest</tabstop>
    <tabstop>radioButton_cover_art_fetcher_high</tabstop>
    <tabstop>radioButton_cover_art_fetcher_medium</tabstop>
--- 
-2.53.0
+--
+2.47.2
 
