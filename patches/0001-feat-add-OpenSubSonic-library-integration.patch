@@ -1,31 +1,37 @@
-From 653e1bd40907bcd4ad50e8b9eda10ac63a6eb0ce Mon Sep 17 00:00:00 2001
+From 229db682e3a8cf63eca909e3624eab4a0a8ed89a Mon Sep 17 00:00:00 2001
 From: turtton <top.gear7509@turtton.net>
-Date: Fri, 8 May 2026 17:08:12 +0900
-Subject: [PATCH] feat: add OpenSubSonic library integration
+Date: Fri, 8 May 2026 20:17:03 +0900
+Subject: [PATCH] feat: add OpenSubSonic library integration with cache-based
+ playback
 
 ---
- CMakeLists.txt                                |   2 +
+ CMakeLists.txt                                |   3 +
  src/library/library.cpp                       |   7 +
- .../opensubsonic/opensubsonicapiclient.cpp    | 282 ++++++++++
- .../opensubsonic/opensubsonicapiclient.h      |  95 ++++
- .../opensubsonic/opensubsonicfeature.cpp      | 532 ++++++++++++++++++
- .../opensubsonic/opensubsonicfeature.h        |  71 +++
- 6 files changed, 989 insertions(+)
+ .../opensubsonic/opensubsonicapiclient.cpp    | 282 +++++++++
+ .../opensubsonic/opensubsonicapiclient.h      |  95 +++
+ .../opensubsonic/opensubsonicfeature.cpp      | 552 ++++++++++++++++++
+ .../opensubsonic/opensubsonicfeature.h        |  73 +++
+ .../opensubsonic/opensubsonictrackmodel.cpp   |  98 ++++
+ .../opensubsonic/opensubsonictrackmodel.h     |  35 ++
+ 8 files changed, 1145 insertions(+)
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.cpp
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.h
  create mode 100644 src/library/opensubsonic/opensubsonicfeature.cpp
  create mode 100644 src/library/opensubsonic/opensubsonicfeature.h
+ create mode 100644 src/library/opensubsonic/opensubsonictrackmodel.cpp
+ create mode 100644 src/library/opensubsonic/opensubsonictrackmodel.h
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 95eb1c8..fca1a27 100644
+index 95eb1c8..9476327 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -982,6 +982,8 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+@@ -982,6 +982,9 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
    src/library/itunes/itunesimporter.cpp
    src/library/itunes/itunesplaylistmodel.cpp
    src/library/itunes/itunesxmlimporter.cpp
 +  src/library/opensubsonic/opensubsonicapiclient.cpp
 +  src/library/opensubsonic/opensubsonicfeature.cpp
++  src/library/opensubsonic/opensubsonictrackmodel.cpp
    src/library/library_prefs.cpp
    src/library/library.cpp
    src/library/librarycontrol.cpp
@@ -445,21 +451,23 @@ index 0000000..0f5ceba
 +} // namespace mixxx
 diff --git a/src/library/opensubsonic/opensubsonicfeature.cpp b/src/library/opensubsonic/opensubsonicfeature.cpp
 new file mode 100644
-index 0000000..00d31f3
+index 0000000..fa23f79
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicfeature.cpp
-@@ -0,0 +1,532 @@
+@@ -0,0 +1,552 @@
 +#include "library/opensubsonic/opensubsonicfeature.h"
 +
 +#include <QJsonArray>
 +#include <QJsonObject>
 +#include <QMessageBox>
 +#include <QSqlQuery>
++#include <QStandardPaths>
 +
 +#include "library/baseexternalplaylistmodel.h"
 +#include "library/baseexternaltrackmodel.h"
 +#include "library/basetrackcache.h"
 +#include "library/library.h"
++#include "library/opensubsonic/opensubsonictrackmodel.h"
 +#include "library/queryutil.h"
 +#include "library/trackcollection.h"
 +#include "library/trackcollectionmanager.h"
@@ -487,7 +495,7 @@ index 0000000..00d31f3
 +                "    year INTEGER,"
 +                "    genre TEXT,"
 +                "    tracknumber TEXT,"
-+                "    location TEXT UNIQUE,"
++                "    location TEXT,"
 +                "    comment TEXT,"
 +                "    duration INTEGER,"
 +                "    bitrate TEXT,"
@@ -565,11 +573,13 @@ index 0000000..00d31f3
 +            std::move(searchColumns),
 +            false);
 +
-+    m_pTrackModel = new BaseExternalTrackModel(this,
++    m_pTrackModel = new OpenSubSonicTrackModel(this,
 +            m_pLibrary->trackCollectionManager(),
 +            "mixxx.db.model.opensubsonic",
 +            kTableLibrary,
-+            m_trackSource);
++            m_trackSource,
++            nullptr,
++            nullptr);
 +    m_pPlaylistModel = new BaseExternalPlaylistModel(this,
 +            m_pLibrary->trackCollectionManager(),
 +            "mixxx.db.model.opensubsonic_playlist",
@@ -678,6 +688,9 @@ index 0000000..00d31f3
 +    m_pApiClient = std::make_unique<OpenSubSonicApiClient>(
 +            m_pNetworkManager.get(), config, this);
 +
++    m_pTrackModel->setNetworkManager(m_pNetworkManager.get());
++    m_pTrackModel->setApiClient(m_pApiClient.get());
++
 +    connect(m_pApiClient.get(),
 +            &OpenSubSonicApiClient::pingSucceeded,
 +            this,
@@ -732,6 +745,7 @@ index 0000000..00d31f3
 +            m_activeViewId != artistId) {
 +        return;
 +    }
++    m_pendingArtistId = artistId;
 +
 +    const QJsonArray albums = artist.value(QStringLiteral("album")).toArray();
 +    if (albums.isEmpty()) {
@@ -763,7 +777,7 @@ index 0000000..00d31f3
 +
 +    QSqlQuery query(m_database);
 +    query.prepare(QStringLiteral(
-+            "INSERT OR REPLACE INTO opensubsonic_library "
++            "INSERT INTO opensubsonic_library "
 +            "(artist, title, album, album_artist, year, genre, tracknumber, "
 +            "location, comment, duration, bitrate, bpm, key, rating) "
 +            "VALUES (:artist, :title, :album, :album_artist, :year, :genre, "
@@ -787,8 +801,10 @@ index 0000000..00d31f3
 +                song.value(QStringLiteral("genre")).toString());
 +        query.bindValue(QStringLiteral(":tracknumber"),
 +                QString::number(song.value(QStringLiteral("track")).toInt()));
++        const QString suffix = song.value(QStringLiteral("suffix")).toString(
++                QStringLiteral("mp3"));
 +        query.bindValue(QStringLiteral(":location"),
-+                m_pApiClient->streamUrl(songId).toString());
++                cachePath(songId, suffix));
 +        query.bindValue(QStringLiteral(":comment"), QString());
 +        query.bindValue(QStringLiteral(":duration"),
 +                song.value(QStringLiteral("duration")).toInt());
@@ -811,7 +827,8 @@ index 0000000..00d31f3
 +    const QJsonArray songs = album.value(QStringLiteral("song")).toArray();
 +
 +    if (m_pendingArtistAlbumLoads > 0) {
-+        if (m_activeViewType != QStringLiteral("artist")) {
++        if (m_activeViewType != QStringLiteral("artist") ||
++                m_activeViewId != m_pendingArtistId) {
 +            return;
 +        }
 +        insertTracksFromSongs(songs, false);
@@ -867,7 +884,7 @@ index 0000000..00d31f3
 +
 +    QSqlQuery trackQuery(m_database);
 +    trackQuery.prepare(QStringLiteral(
-+            "INSERT OR REPLACE INTO opensubsonic_library "
++            "INSERT INTO opensubsonic_library "
 +            "(artist, title, album, album_artist, year, genre, tracknumber, "
 +            "location, comment, duration, bitrate, bpm, key, rating) "
 +            "VALUES (:artist, :title, :album, :album_artist, :year, :genre, "
@@ -892,8 +909,10 @@ index 0000000..00d31f3
 +                entry.value(QStringLiteral("genre")).toString());
 +        trackQuery.bindValue(QStringLiteral(":tracknumber"),
 +                QString::number(entry.value(QStringLiteral("track")).toInt()));
++        const QString suffix = entry.value(QStringLiteral("suffix")).toString(
++                QStringLiteral("mp3"));
 +        trackQuery.bindValue(QStringLiteral(":location"),
-+                m_pApiClient->streamUrl(songId).toString());
++                cachePath(songId, suffix));
 +        trackQuery.bindValue(QStringLiteral(":comment"), QString());
 +        trackQuery.bindValue(QStringLiteral(":duration"),
 +                entry.value(QStringLiteral("duration")).toInt());
@@ -981,12 +1000,19 @@ index 0000000..00d31f3
 +    Q_UNUSED(data);
 +    return nullptr;
 +}
++
++QString OpenSubSonicFeature::cachePath(
++        const QString& songId, const QString& suffix) const {
++    const QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
++            QStringLiteral("/opensubsonic");
++    return cacheDir + QStringLiteral("/") + songId + QStringLiteral(".") + suffix;
++}
 diff --git a/src/library/opensubsonic/opensubsonicfeature.h b/src/library/opensubsonic/opensubsonicfeature.h
 new file mode 100644
-index 0000000..30feb97
+index 0000000..a3f5892
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicfeature.h
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,73 @@
 +#pragma once
 +
 +#include <QJsonArray>
@@ -997,10 +1023,10 @@ index 0000000..30feb97
 +
 +#include "library/baseexternallibraryfeature.h"
 +#include "library/opensubsonic/opensubsonicapiclient.h"
++#include "library/opensubsonic/opensubsonictrackmodel.h"
 +#include "library/treeitemmodel.h"
 +#include "util/parented_ptr.h"
 +
-+class BaseExternalTrackModel;
 +class BaseExternalPlaylistModel;
 +class BaseTrackCache;
 +
@@ -1037,6 +1063,7 @@ index 0000000..30feb97
 +    void buildArtistTree(TreeItem* pParent, const QJsonArray& artistIndex);
 +    void buildPlaylistTree(TreeItem* pParent, const QJsonArray& playlists);
 +    void insertTracksFromSongs(const QJsonArray& songs, bool clearFirst);
++    QString cachePath(const QString& songId, const QString& suffix) const;
 +
 +    std::unique_ptr<BaseSqlTableModel> createPlaylistModelForPlaylist(
 +            const QVariant& data) override;
@@ -1046,7 +1073,7 @@ index 0000000..30feb97
 +    std::unique_ptr<mixxx::library::opensubsonic::OpenSubSonicApiClient> m_pApiClient;
 +
 +    QSharedPointer<BaseTrackCache> m_trackSource;
-+    BaseExternalTrackModel* m_pTrackModel;
++    OpenSubSonicTrackModel* m_pTrackModel;
 +    BaseExternalPlaylistModel* m_pPlaylistModel;
 +
 +    QSqlDatabase m_database;
@@ -1056,7 +1083,153 @@ index 0000000..30feb97
 +
 +    QString m_activeViewType;
 +    QString m_activeViewId;
++    QString m_pendingArtistId;
 +    int m_pendingArtistAlbumLoads;
++};
+diff --git a/src/library/opensubsonic/opensubsonictrackmodel.cpp b/src/library/opensubsonic/opensubsonictrackmodel.cpp
+new file mode 100644
+index 0000000..adef5c1
+--- /dev/null
++++ b/src/library/opensubsonic/opensubsonictrackmodel.cpp
+@@ -0,0 +1,98 @@
++#include "library/opensubsonic/opensubsonictrackmodel.h"
++
++#include <QDir>
++#include <QEventLoop>
++#include <QFileInfo>
++#include <QNetworkReply>
++#include <QNetworkRequest>
++
++#include "moc_opensubsonictrackmodel.cpp"
++#include "util/logger.h"
++
++namespace {
++const mixxx::Logger kLogger("OpenSubSonicTrackModel");
++} // anonymous namespace
++
++OpenSubSonicTrackModel::OpenSubSonicTrackModel(QObject* parent,
++        TrackCollectionManager* pTrackCollectionManager,
++        const char* settingsNamespace,
++        const QString& trackTable,
++        QSharedPointer<BaseTrackCache> trackSource,
++        QNetworkAccessManager* pNetworkManager,
++        mixxx::library::opensubsonic::OpenSubSonicApiClient* pApiClient)
++        : BaseExternalTrackModel(parent,
++                  pTrackCollectionManager,
++                  settingsNamespace,
++                  trackTable,
++                  std::move(trackSource)),
++          m_pNetworkManager(pNetworkManager),
++          m_pApiClient(pApiClient) {
++}
++
++TrackPointer OpenSubSonicTrackModel::getTrack(const QModelIndex& index) const {
++    QString nativeLocation = getFieldString(
++            index, ColumnCache::COLUMN_TRACKLOCATIONSTABLE_LOCATION);
++    QString location = QDir::fromNativeSeparators(nativeLocation);
++
++    if (location.isEmpty()) {
++        return TrackPointer();
++    }
++
++    // If the file doesn't exist locally, download from server
++    if (!QFileInfo::exists(location)) {
++        if (!ensureCached(location)) {
++            kLogger.warning() << "Failed to download track to cache:" << location;
++            return TrackPointer();
++        }
++    }
++
++    // Delegate to base class which uses TrackRef::fromFilePath
++    return BaseExternalTrackModel::getTrack(index);
++}
++
++bool OpenSubSonicTrackModel::ensureCached(const QString& location) const {
++    if (!m_pApiClient || !m_pNetworkManager) {
++        return false;
++    }
++
++    // Extract song ID from cache path: .../opensubsonic/<songId>.<ext>
++    const QString songId = QFileInfo(location).completeBaseName();
++    if (songId.isEmpty()) {
++        return false;
++    }
++
++    const QUrl streamUrl = m_pApiClient->streamUrl(songId);
++    if (!streamUrl.isValid()) {
++        return false;
++    }
++
++    // Ensure cache directory exists
++    QDir().mkpath(QFileInfo(location).absolutePath());
++
++    // Synchronous download using QEventLoop
++    QNetworkRequest request(streamUrl);
++    QNetworkReply* pReply = m_pNetworkManager->get(request);
++
++    QEventLoop loop;
++    QObject::connect(pReply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
++    loop.exec();
++
++    if (pReply->error() != QNetworkReply::NoError) {
++        kLogger.warning() << "Download failed:" << pReply->errorString();
++        pReply->deleteLater();
++        return false;
++    }
++
++    QFile file(location);
++    if (!file.open(QIODevice::WriteOnly)) {
++        kLogger.warning() << "Failed to open cache file for writing:" << location;
++        pReply->deleteLater();
++        return false;
++    }
++
++    file.write(pReply->readAll());
++    file.close();
++    pReply->deleteLater();
++
++    return QFileInfo::exists(location);
++}
+diff --git a/src/library/opensubsonic/opensubsonictrackmodel.h b/src/library/opensubsonic/opensubsonictrackmodel.h
+new file mode 100644
+index 0000000..2ea30dd
+--- /dev/null
++++ b/src/library/opensubsonic/opensubsonictrackmodel.h
+@@ -0,0 +1,35 @@
++#pragma once
++
++#include <QNetworkAccessManager>
++
++#include "library/baseexternaltrackmodel.h"
++#include "library/opensubsonic/opensubsonicapiclient.h"
++
++class OpenSubSonicTrackModel : public BaseExternalTrackModel {
++    Q_OBJECT
++
++  public:
++    OpenSubSonicTrackModel(QObject* parent,
++            TrackCollectionManager* pTrackCollectionManager,
++            const char* settingsNamespace,
++            const QString& trackTable,
++            QSharedPointer<BaseTrackCache> trackSource,
++            QNetworkAccessManager* pNetworkManager,
++            mixxx::library::opensubsonic::OpenSubSonicApiClient* pApiClient);
++    ~OpenSubSonicTrackModel() override = default;
++
++    TrackPointer getTrack(const QModelIndex& index) const override;
++
++    void setNetworkManager(QNetworkAccessManager* pNetworkManager) {
++        m_pNetworkManager = pNetworkManager;
++    }
++    void setApiClient(mixxx::library::opensubsonic::OpenSubSonicApiClient* pApiClient) {
++        m_pApiClient = pApiClient;
++    }
++
++  private:
++    bool ensureCached(const QString& location) const;
++
++    QNetworkAccessManager* m_pNetworkManager;
++    mixxx::library::opensubsonic::OpenSubSonicApiClient* m_pApiClient;
 +};
 -- 
 2.53.0

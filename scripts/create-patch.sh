@@ -42,23 +42,48 @@ fi
 
 cd "$UPSTREAM_DIR"
 
-if git diff --quiet HEAD && git diff --cached --quiet; then
+if git diff --quiet HEAD && git diff --cached --quiet && \
+   [[ -z "$(git ls-files --others --exclude-standard)" ]]; then
   echo "ERROR: No changes detected in .upstream/" >&2
   exit 1
 fi
 
 NEXT_NUM=$(printf "%04d" $(($(max_prefix) + 1)))
 OUTPUT_FILE="$PATCHES_DIR/${NEXT_NUM}-${PATCH_NAME}.patch"
-
 mkdir -p "$PATCHES_DIR"
 
+# Capture current tree (existing patches + user changes)
 git add -A
-git diff --cached HEAD > "$OUTPUT_FILE"
+STATE_CURRENT=$(git write-tree)
+
+# Compute baseline tree (pristine HEAD + existing patches only)
+git checkout -- . 2>/dev/null
+git clean -fd >/dev/null 2>&1
+
+shopt -s nullglob
+existing_patches=("$PATCHES_DIR"/*.patch)
+shopt -u nullglob
+
+for patch in "${existing_patches[@]}"; do
+  git apply "$patch"
+done
+
+git add -A
+STATE_BASELINE=$(git write-tree)
+
+# Incremental diff: baseline → current = only user's new changes
+git diff-tree -p "$STATE_BASELINE" "$STATE_CURRENT" > "$OUTPUT_FILE"
+
+# Restore working tree to current state
+git checkout -- . 2>/dev/null
+git clean -fd >/dev/null 2>&1
+git read-tree "$STATE_CURRENT"
+git checkout-index -a -f
 git reset HEAD -- . >/dev/null 2>&1
 
 if [[ ! -s "$OUTPUT_FILE" ]]; then
   rm -f "$OUTPUT_FILE"
-  echo "ERROR: No diff output generated" >&2
+  echo "ERROR: No incremental changes detected (changes may already be in existing patches)" >&2
   exit 1
 fi
 
