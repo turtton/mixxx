@@ -20,19 +20,28 @@ DRY_RUN="${1:-}"
 
 cd "$UPSTREAM_DIR"
 
-for patch in "$PATCHES_DIR"/*.patch; do
-  patch_name="$(basename "$patch")"
-  if [[ "$DRY_RUN" == "--dry-run" ]]; then
+if [[ "$DRY_RUN" == "--dry-run" ]]; then
+  for patch in "$PATCHES_DIR"/*.patch; do
+    patch_name="$(basename "$patch")"
     echo "Dry-run: $patch_name"
     if ! git apply --check "$patch" 2>/dev/null; then
       echo "  CONFLICT: $patch_name would not apply cleanly" >&2
       exit 1
     fi
     echo "  OK: $patch_name applies cleanly"
-  else
-    echo "Applying: $patch_name"
+  done
+else
+  for patch in "$PATCHES_DIR"/*.patch; do
+    patch_name="$(basename "$patch")"
+    if ! git apply --check "$patch" 2>/dev/null; then
+      echo "CONFLICT: $patch_name would not apply cleanly (preflight)" >&2
+      exit 1
+    fi
+  done
+  for patch in "$PATCHES_DIR"/*.patch; do
+    echo "Applying: $(basename "$patch")"
     git apply "$patch"
-  fi
-done
+  done
+fi
 
 echo "All patches applied successfully."

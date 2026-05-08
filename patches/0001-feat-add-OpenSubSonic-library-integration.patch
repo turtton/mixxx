@@ -1,16 +1,16 @@
-From b41040a01d88e281c0f231c4dc85cac93e6db529 Mon Sep 17 00:00:00 2001
+From 653e1bd40907bcd4ad50e8b9eda10ac63a6eb0ce Mon Sep 17 00:00:00 2001
 From: turtton <top.gear7509@turtton.net>
-Date: Fri, 8 May 2026 16:46:38 +0900
+Date: Fri, 8 May 2026 17:08:12 +0900
 Subject: [PATCH] feat: add OpenSubSonic library integration
 
 ---
  CMakeLists.txt                                |   2 +
  src/library/library.cpp                       |   7 +
- .../opensubsonic/opensubsonicapiclient.cpp    | 278 +++++++++
+ .../opensubsonic/opensubsonicapiclient.cpp    | 282 ++++++++++
  .../opensubsonic/opensubsonicapiclient.h      |  95 ++++
  .../opensubsonic/opensubsonicfeature.cpp      | 532 ++++++++++++++++++
  .../opensubsonic/opensubsonicfeature.h        |  71 +++
- 6 files changed, 985 insertions(+)
+ 6 files changed, 989 insertions(+)
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.cpp
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.h
  create mode 100644 src/library/opensubsonic/opensubsonicfeature.cpp
@@ -56,10 +56,10 @@ index 3a17c06..af938be 100644
          if (feature) {
 diff --git a/src/library/opensubsonic/opensubsonicapiclient.cpp b/src/library/opensubsonic/opensubsonicapiclient.cpp
 new file mode 100644
-index 0000000..b81f334
+index 0000000..22f65c6
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicapiclient.cpp
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,282 @@
 +#include "library/opensubsonic/opensubsonicapiclient.h"
 +
 +#include <QCryptographicHash>
@@ -126,9 +126,13 @@ index 0000000..b81f334
 +}
 +
 +QPair<QString, QString> OpenSubSonicApiClient::generateDeterministicAuthToken() const {
++    QUrl normalized = m_config.serverUrl;
++    normalized.setPath(normalizedPath(m_config.serverUrl));
++    normalized.setQuery(QString());
++    normalized.setFragment(QString());
 +    const QString salt = QString::fromLatin1(
 +            QCryptographicHash::hash(
-+                    (m_config.username + m_config.serverUrl.toString()).toUtf8(),
++                    (m_config.username + normalized.toString()).toUtf8(),
 +                    QCryptographicHash::Sha256)
 +                    .toHex()
 +                    .left(16));

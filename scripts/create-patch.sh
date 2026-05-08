@@ -13,12 +13,19 @@ fi
 
 PATCH_NAME="${1:-}"
 
+if [[ -n "$PATCH_NAME" ]] && [[ ! "$PATCH_NAME" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+  echo "ERROR: Patch name must contain only [a-zA-Z0-9._-]" >&2
+  exit 1
+fi
+
 max_prefix() {
   local max=0
   for f in "$PATCHES_DIR"/*.patch; do
     [[ -f "$f" ]] || continue
-    local num
-    num=$(basename "$f" | grep -oP '^\d+' || echo 0)
+    local base num
+    base=$(basename "$f")
+    num=${base%%[!0-9]*}
+    num=${num:-0}
     num=$((10#$num))
     [[ $num -gt $max ]] && max=$num
   done

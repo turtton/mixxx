@@ -9,16 +9,14 @@ jobs:
   check-patches:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-
       - name: Fetch upstream and test patches
         id: test
         run: |
+          set -euo pipefail
           chmod +x scripts/*.sh
           ./scripts/fetch-upstream.sh
           if ./scripts/apply-patches.sh --dry-run 2>&1; then
@@ -27,15 +25,16 @@ jobs:
             echo "status=conflict" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Comment on conflict
+      - name: Comment and fail on conflict
         if: steps.test.outputs.status == 'conflict'
         run: |
           gh pr comment "${{ github.event.pull_request.number }}" \
             --body "Patches have conflicts with the new upstream version. Manual resolution needed."
+          exit 1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Approve if clean
+      - name: Comment if clean
         if: steps.test.outputs.status == 'clean'
         run: |
           gh pr comment "${{ github.event.pull_request.number }}" \
