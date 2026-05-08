@@ -1,8 +1,8 @@
-From 229db682e3a8cf63eca909e3624eab4a0a8ed89a Mon Sep 17 00:00:00 2001
+From 066cfb19d2cc2d4b5198910bd9bd2bd0446b9866 Mon Sep 17 00:00:00 2001
 From: turtton <top.gear7509@turtton.net>
-Date: Fri, 8 May 2026 20:17:03 +0900
-Subject: [PATCH] feat: add OpenSubSonic library integration with cache-based
- playback
+Date: Fri, 8 May 2026 20:41:55 +0900
+Subject: [PATCH] feat: add OpenSubSonic library integration with preferences
+ UI
 
 ---
  CMakeLists.txt                                |   3 +
@@ -13,7 +13,9 @@ Subject: [PATCH] feat: add OpenSubSonic library integration with cache-based
  .../opensubsonic/opensubsonicfeature.h        |  73 +++
  .../opensubsonic/opensubsonictrackmodel.cpp   |  98 ++++
  .../opensubsonic/opensubsonictrackmodel.h     |  35 ++
- 8 files changed, 1145 insertions(+)
+ src/preferences/dialog/dlgpreflibrary.cpp     |  23 +
+ src/preferences/dialog/dlgpreflibrarydlg.ui   |  74 ++-
+ 10 files changed, 1241 insertions(+), 1 deletion(-)
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.cpp
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.h
  create mode 100644 src/library/opensubsonic/opensubsonicfeature.cpp
@@ -1231,6 +1233,160 @@ index 0000000..2ea30dd
 +    QNetworkAccessManager* m_pNetworkManager;
 +    mixxx::library::opensubsonic::OpenSubSonicApiClient* m_pApiClient;
 +};
+diff --git a/src/preferences/dialog/dlgpreflibrary.cpp b/src/preferences/dialog/dlgpreflibrary.cpp
+index 142a533..4a93f88 100644
+--- a/src/preferences/dialog/dlgpreflibrary.cpp
++++ b/src/preferences/dialog/dlgpreflibrary.cpp
+@@ -267,6 +267,11 @@ void DlgPrefLibrary::slotResetToDefaults() {
+     checkBox_show_itunes->setChecked(true);
+     checkBox_show_traktor->setChecked(true);
+     checkBox_show_rekordbox->setChecked(true);
++
++    checkBox_show_opensubsonic->setChecked(false);
++    lineEdit_opensubsonic_url->clear();
++    lineEdit_opensubsonic_username->clear();
++    lineEdit_opensubsonic_password->clear();
+ }
+ 
+ void DlgPrefLibrary::slotUpdate() {
+@@ -302,6 +307,15 @@ void DlgPrefLibrary::slotUpdate() {
+     checkBox_show_serato->setChecked(m_pConfig->getValue(
+             ConfigKey("[Library]", "ShowSeratoLibrary"), true));
+ 
++    checkBox_show_opensubsonic->setChecked(m_pConfig->getValue(
++            ConfigKey("[Library]", "ShowOpenSubSonicLibrary"), false));
++    lineEdit_opensubsonic_url->setText(m_pConfig->getValueString(
++            ConfigKey("[Library]", "OpenSubSonicServerUrl")));
++    lineEdit_opensubsonic_username->setText(m_pConfig->getValueString(
++            ConfigKey("[Library]", "OpenSubSonicUsername")));
++    lineEdit_opensubsonic_password->setText(m_pConfig->getValueString(
++            ConfigKey("[Library]", "OpenSubSonicPassword")));
++
+     switch (m_pConfig->getValue<int>(
+             kTrackDoubleClickActionConfigKey,
+             static_cast<int>(TrackDoubleClickAction::LoadToDeck))) {
+@@ -544,6 +558,15 @@ void DlgPrefLibrary::slotApply() {
+     m_pConfig->set(ConfigKey("[Library]", "ShowSeratoLibrary"),
+             ConfigValue((int)checkBox_show_serato->isChecked()));
+ 
++    m_pConfig->set(ConfigKey("[Library]", "ShowOpenSubSonicLibrary"),
++            ConfigValue((int)checkBox_show_opensubsonic->isChecked()));
++    m_pConfig->set(ConfigKey("[Library]", "OpenSubSonicServerUrl"),
++            ConfigValue(lineEdit_opensubsonic_url->text()));
++    m_pConfig->set(ConfigKey("[Library]", "OpenSubSonicUsername"),
++            ConfigValue(lineEdit_opensubsonic_username->text()));
++    m_pConfig->set(ConfigKey("[Library]", "OpenSubSonicPassword"),
++            ConfigValue(lineEdit_opensubsonic_password->text()));
++
+     int coverartfetcherquality_status;
+     if (radioButton_cover_art_fetcher_highest->isChecked()) {
+         coverartfetcherquality_status = static_cast<int>(CoverArtFetcherQuality::Highest);
+diff --git a/src/preferences/dialog/dlgpreflibrarydlg.ui b/src/preferences/dialog/dlgpreflibrarydlg.ui
+index cb943bc..2faaf8a 100644
+--- a/src/preferences/dialog/dlgpreflibrarydlg.ui
++++ b/src/preferences/dialog/dlgpreflibrarydlg.ui
+@@ -498,6 +498,16 @@
+        </widget>
+       </item>
+       <item row="6" column="0">
++       <widget class="QCheckBox" name="checkBox_show_opensubsonic">
++        <property name="text">
++         <string>Show OpenSubSonic Library</string>
++        </property>
++        <property name="checked">
++         <bool>false</bool>
++        </property>
++       </widget>
++      </item>
++      <item row="8" column="0">
+        <widget class="QLabel" name="label_4">
+         <property name="text">
+          <string>All external libraries shown are write protected.</string>
+@@ -510,7 +520,7 @@
+         </property>
+        </widget>
+       </item>
+-      <item row="7" column="0">
++      <item row="9" column="0">
+        <widget class="QLabel" name="label_11">
+         <property name="text">
+          <string>You will need to restart Mixxx for these settings to take effect.</string>
+@@ -524,6 +534,64 @@
+     </widget>
+    </item>
+ 
++   <item>
++    <widget class="QGroupBox" name="groupBox_opensubsonic">
++     <property name="title">
++      <string>OpenSubSonic Server</string>
++     </property>
++     <layout class="QFormLayout" name="formLayout_opensubsonic">
++      <item row="0" column="0">
++       <widget class="QLabel" name="label_opensubsonic_url">
++        <property name="text">
++         <string>Server URL</string>
++        </property>
++       </widget>
++      </item>
++      <item row="0" column="1">
++       <widget class="QLineEdit" name="lineEdit_opensubsonic_url">
++        <property name="placeholderText">
++         <string>https://your-server.example.com</string>
++        </property>
++       </widget>
++      </item>
++      <item row="1" column="0">
++       <widget class="QLabel" name="label_opensubsonic_username">
++        <property name="text">
++         <string>Username</string>
++        </property>
++       </widget>
++      </item>
++      <item row="1" column="1">
++       <widget class="QLineEdit" name="lineEdit_opensubsonic_username"/>
++      </item>
++      <item row="2" column="0">
++       <widget class="QLabel" name="label_opensubsonic_password">
++        <property name="text">
++         <string>Password</string>
++        </property>
++       </widget>
++      </item>
++      <item row="2" column="1">
++       <widget class="QLineEdit" name="lineEdit_opensubsonic_password">
++        <property name="echoMode">
++         <enum>QLineEdit::Password</enum>
++        </property>
++       </widget>
++      </item>
++      <item row="3" column="0" colspan="2">
++       <widget class="QLabel" name="label_opensubsonic_note">
++        <property name="text">
++         <string>These settings require a restart of Mixxx to take effect.</string>
++        </property>
++        <property name="wordWrap">
++         <bool>true</bool>
++        </property>
++       </widget>
++      </item>
++     </layout>
++    </widget>
++   </item>
++
+    <item>
+     <widget class="QGroupBox" name="groupBox_cover_art_fetcher">
+      <property name="title">
+@@ -695,6 +763,10 @@
+   <tabstop>checkBox_show_traktor</tabstop>
+   <tabstop>checkBox_show_rekordbox</tabstop>
+   <tabstop>checkBox_show_serato</tabstop>
++  <tabstop>checkBox_show_opensubsonic</tabstop>
++  <tabstop>lineEdit_opensubsonic_url</tabstop>
++  <tabstop>lineEdit_opensubsonic_username</tabstop>
++  <tabstop>lineEdit_opensubsonic_password</tabstop>
+   <tabstop>radioButton_cover_art_fetcher_highest</tabstop>
+   <tabstop>radioButton_cover_art_fetcher_high</tabstop>
+   <tabstop>radioButton_cover_art_fetcher_medium</tabstop>
 -- 
 2.53.0
 
