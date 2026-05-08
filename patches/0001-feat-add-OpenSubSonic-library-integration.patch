@@ -1,21 +1,21 @@
-From 066cfb19d2cc2d4b5198910bd9bd2bd0446b9866 Mon Sep 17 00:00:00 2001
+From fabc355e83423062047fd0f6c9a28a6f24dcfcf6 Mon Sep 17 00:00:00 2001
 From: turtton <top.gear7509@turtton.net>
-Date: Fri, 8 May 2026 20:41:55 +0900
+Date: Fri, 8 May 2026 21:10:04 +0900
 Subject: [PATCH] feat: add OpenSubSonic library integration with preferences
- UI
+ UI and auth fallback
 
 ---
  CMakeLists.txt                                |   3 +
  src/library/library.cpp                       |   7 +
- .../opensubsonic/opensubsonicapiclient.cpp    | 282 +++++++++
- .../opensubsonic/opensubsonicapiclient.h      |  95 +++
+ .../opensubsonic/opensubsonicapiclient.cpp    | 311 ++++++++++
+ .../opensubsonic/opensubsonicapiclient.h      | 103 ++++
  .../opensubsonic/opensubsonicfeature.cpp      | 552 ++++++++++++++++++
  .../opensubsonic/opensubsonicfeature.h        |  73 +++
  .../opensubsonic/opensubsonictrackmodel.cpp   |  98 ++++
  .../opensubsonic/opensubsonictrackmodel.h     |  35 ++
  src/preferences/dialog/dlgpreflibrary.cpp     |  23 +
  src/preferences/dialog/dlgpreflibrarydlg.ui   |  74 ++-
- 10 files changed, 1241 insertions(+), 1 deletion(-)
+ 10 files changed, 1278 insertions(+), 1 deletion(-)
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.cpp
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.h
  create mode 100644 src/library/opensubsonic/opensubsonicfeature.cpp
@@ -64,10 +64,10 @@ index 3a17c06..af938be 100644
          if (feature) {
 diff --git a/src/library/opensubsonic/opensubsonicapiclient.cpp b/src/library/opensubsonic/opensubsonicapiclient.cpp
 new file mode 100644
-index 0000000..22f65c6
+index 0000000..ab4765a
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicapiclient.cpp
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,311 @@
 +#include "library/opensubsonic/opensubsonicapiclient.h"
 +
 +#include <QCryptographicHash>
@@ -151,15 +151,26 @@ index 0000000..22f65c6
 +}
 +
 +QUrlQuery OpenSubSonicApiClient::buildAuthQuery() const {
++    return buildAuthQueryForMethod(m_authMethod);
++}
++
++QUrlQuery OpenSubSonicApiClient::buildAuthQueryForMethod(AuthMethod method) const {
 +    QUrlQuery query;
 +    query.addQueryItem(QStringLiteral("u"), m_config.username);
 +    query.addQueryItem(QStringLiteral("v"), m_config.apiVersion);
 +    query.addQueryItem(QStringLiteral("c"), m_config.clientName);
 +    query.addQueryItem(QStringLiteral("f"), QStringLiteral("json"));
 +
-+    const auto [token, salt] = generateAuthToken();
-+    query.addQueryItem(QStringLiteral("t"), token);
-+    query.addQueryItem(QStringLiteral("s"), salt);
++    if (method == AuthMethod::Token) {
++        const auto [token, salt] = generateAuthToken();
++        query.addQueryItem(QStringLiteral("t"), token);
++        query.addQueryItem(QStringLiteral("s"), salt);
++    } else {
++        const QString hexPassword = QString::fromLatin1(
++                m_config.password.toUtf8().toHex());
++        query.addQueryItem(QStringLiteral("p"),
++                QStringLiteral("enc:") + hexPassword);
++    }
 +
 +    return query;
 +}
@@ -230,7 +241,18 @@ index 0000000..22f65c6
 +        const QJsonObject error = response.value(QStringLiteral("error")).toObject();
 +        const QString errorMsg = error.value(QStringLiteral("message")).toString(
 +                QStringLiteral("Unknown server error"));
++        const int errorCode = error.value(QStringLiteral("code")).toInt();
 +        kLogger.warning() << "Server error for" << endpoint << ":" << errorMsg;
++
++        if (m_authMethod == AuthMethod::Token &&
++                (errorMsg.contains(QStringLiteral("Token"), Qt::CaseInsensitive) ||
++                        errorCode == 40 || errorCode == 41)) {
++            kLogger.info() << "Token auth not supported, falling back to password auth";
++            m_authMethod = AuthMethod::Password;
++            sendRequest(endpoint);
++            return;
++        }
++
 +        if (endpoint == QStringLiteral("ping")) {
 +            emit pingFailed(errorMsg);
 +        }
@@ -332,9 +354,16 @@ index 0000000..22f65c6
 +    query.addQueryItem(QStringLiteral("c"), m_config.clientName);
 +    query.addQueryItem(QStringLiteral("f"), QStringLiteral("json"));
 +
-+    const auto [token, salt] = generateDeterministicAuthToken();
-+    query.addQueryItem(QStringLiteral("t"), token);
-+    query.addQueryItem(QStringLiteral("s"), salt);
++    if (m_authMethod == AuthMethod::Token) {
++        const auto [token, salt] = generateDeterministicAuthToken();
++        query.addQueryItem(QStringLiteral("t"), token);
++        query.addQueryItem(QStringLiteral("s"), salt);
++    } else {
++        const QString hexPassword = QString::fromLatin1(
++                m_config.password.toUtf8().toHex());
++        query.addQueryItem(QStringLiteral("p"),
++                QStringLiteral("enc:") + hexPassword);
++    }
 +
 +    query.addQueryItem(QStringLiteral("id"), id);
 +    if (maxBitRate > 0) {
@@ -352,10 +381,10 @@ index 0000000..22f65c6
 +} // namespace mixxx
 diff --git a/src/library/opensubsonic/opensubsonicapiclient.h b/src/library/opensubsonic/opensubsonicapiclient.h
 new file mode 100644
-index 0000000..0f5ceba
+index 0000000..b92a485
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicapiclient.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,103 @@
 +#pragma once
 +
 +#include <QJsonArray>
@@ -382,6 +411,11 @@ index 0000000..0f5ceba
 +    bool isValid() const {
 +        return serverUrl.isValid() && !username.isEmpty() && !password.isEmpty();
 +    }
++};
++
++enum class AuthMethod {
++    Token,    // t=md5(password+salt), s=salt
++    Password, // p=enc:<hex-encoded password>
 +};
 +
 +class OpenSubSonicApiClient : public QObject {
@@ -438,14 +472,17 @@ index 0000000..0f5ceba
 +  private:
 +    QUrl buildRequestUrl(const QString& endpoint) const;
 +    QUrlQuery buildAuthQuery() const;
++    QUrlQuery buildAuthQueryForMethod(AuthMethod method) const;
 +    QPair<QString, QString> generateAuthToken() const;
 +    QPair<QString, QString> generateDeterministicAuthToken() const;
 +    void sendRequest(const QString& endpoint, const QUrlQuery& extraParams = QUrlQuery());
 +    void handleResponse(QNetworkReply* reply, const QString& endpoint);
++    void retryWithPasswordAuth(const QString& endpoint, const QUrlQuery& extraParams);
 +    static QString normalizedPath(const QUrl& serverUrl);
 +
 +    QNetworkAccessManager* m_pNetworkManager;
 +    ServerConfig m_config;
++    AuthMethod m_authMethod = AuthMethod::Token;
 +};
 +
 +} // namespace opensubsonic
