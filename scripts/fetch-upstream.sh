@@ -11,21 +11,18 @@ if [[ ! -f "$VERSION_FILE" ]]; then
   exit 1
 fi
 
-VERSION="$(cat "$VERSION_FILE" | tr -d '[:space:]')"
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 REPO_URL="https://github.com/mixxxdj/mixxx.git"
 
 echo "Fetching upstream mixxx version: $VERSION"
 
-if [[ -d "$UPSTREAM_DIR/.git" ]]; then
-  echo "Upstream directory exists, checking out tag..."
-  cd "$UPSTREAM_DIR"
-  git fetch --tags --depth=1 origin "refs/tags/$VERSION:refs/tags/$VERSION" 2>/dev/null || \
-    git fetch --tags origin
-  git checkout "$VERSION" -- . 2>/dev/null || git checkout "tags/$VERSION"
-else
-  echo "Cloning upstream at tag $VERSION..."
+# Always start from a clean state to avoid stale files from previous patches
+if [[ -d "$UPSTREAM_DIR" ]]; then
+  echo "Removing existing upstream directory..."
   rm -rf "$UPSTREAM_DIR"
-  git clone --depth=1 --branch "$VERSION" "$REPO_URL" "$UPSTREAM_DIR"
 fi
+
+echo "Cloning upstream at tag $VERSION..."
+git clone --depth=1 --branch "$VERSION" "$REPO_URL" "$UPSTREAM_DIR"
 
 echo "Upstream source ready at: $UPSTREAM_DIR (version: $VERSION)"

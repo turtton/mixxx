@@ -1,6 +1,6 @@
-From 2efb2ba0e566eb7acd6ee89419ae9b06960d00cb Mon Sep 17 00:00:00 2001
+From 26fbe5927d8e09ba3f6fd0c19948f9d666e0634c Mon Sep 17 00:00:00 2001
 From: turtton <top.gear7509@turtton.net>
-Date: Fri, 8 May 2026 14:45:19 +0900
+Date: Fri, 8 May 2026 15:22:17 +0900
 Subject: [PATCH] feat: add OpenSubSonic library integration
 
 Implement OpenSubSonic/Subsonic REST API client and LibraryFeature
@@ -8,39 +8,37 @@ for streaming music from self-hosted servers (Navidrome, etc.).
 
 - API client with token-based auth (md5(password+salt))
 - Browse artists, albums, playlists from server
-- Stream tracks via authenticated URLs
+- Stream tracks via deterministic authenticated URLs
 - Sidebar tree with Artists/Playlists hierarchy
+- Artists tree fully functional with album loading
 ---
- CMakeLists.txt                                |   5 +-
+ CMakeLists.txt                                |   2 +
  src/library/library.cpp                       |   7 +
- .../opensubsonic/opensubsonicapiclient.cpp    | 234 +++++++++
- .../opensubsonic/opensubsonicapiclient.h      | 111 +++++
- .../opensubsonic/opensubsonicfeature.cpp      | 456 ++++++++++++++++++
+ .../opensubsonic/opensubsonicapiclient.cpp    | 277 ++++++++++
+ .../opensubsonic/opensubsonicapiclient.h      |  95 ++++
+ .../opensubsonic/opensubsonicfeature.cpp      | 509 ++++++++++++++++++
  .../opensubsonic/opensubsonicfeature.h        |  69 +++
- 6 files changed, 880 insertions(+), 2 deletions(-)
+ 6 files changed, 959 insertions(+)
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.cpp
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.h
  create mode 100644 src/library/opensubsonic/opensubsonicfeature.cpp
  create mode 100644 src/library/opensubsonic/opensubsonicfeature.h
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 46547ce610..6955c8bf3d 100644
+index 95eb1c8..fca1a27 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -1422,8 +1422,9 @@ add_library(
+@@ -982,6 +982,8 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/library/itunes/itunesimporter.cpp
    src/library/itunes/itunesplaylistmodel.cpp
-   src/library/itunes/itunestrackmodel.cpp
    src/library/itunes/itunesxmlimporter.cpp
--  src/library/library_prefs.cpp
--  src/library/library.cpp
 +  src/library/opensubsonic/opensubsonicapiclient.cpp
 +  src/library/opensubsonic/opensubsonicfeature.cpp
-+  src/library/library_prefs.cpp  src/library/library.cpp
+   src/library/library_prefs.cpp
+   src/library/library.cpp
    src/library/librarycontrol.cpp
-   src/library/libraryfeature.cpp
-   src/library/librarytablemodel.cpp
 diff --git a/src/library/library.cpp b/src/library/library.cpp
-index 36710fc999..1f124c0792 100644
+index 3a17c06..af938be 100644
 --- a/src/library/library.cpp
 +++ b/src/library/library.cpp
 @@ -19,6 +19,7 @@
@@ -51,7 +49,7 @@ index 36710fc999..1f124c0792 100644
  #include "library/recording/recordingfeature.h"
  #include "library/rekordbox/rekordboxfeature.h"
  #include "library/rhythmbox/rhythmboxfeature.h"
-@@ -217,6 +218,12 @@ Library::Library(
+@@ -207,6 +208,12 @@ Library::Library(
          addFeature(new SeratoFeature(this, m_pConfig));
      }
  
@@ -66,10 +64,10 @@ index 36710fc999..1f124c0792 100644
          if (feature) {
 diff --git a/src/library/opensubsonic/opensubsonicapiclient.cpp b/src/library/opensubsonic/opensubsonicapiclient.cpp
 new file mode 100644
-index 0000000000..e481141ff9
+index 0000000..b325e90
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicapiclient.cpp
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,277 @@
 +#include "library/opensubsonic/opensubsonicapiclient.h"
 +
 +#include <QCryptographicHash>
@@ -115,8 +113,32 @@ index 0000000000..e481141ff9
 +    m_config = config;
 +}
 +
++QString OpenSubSonicApiClient::normalizedPath(const QUrl& serverUrl) {
++    QString path = serverUrl.path();
++    while (path.endsWith(QLatin1Char('/'))) {
++        path.chop(1);
++    }
++    if (path.endsWith(QStringLiteral("/rest"))) {
++        path.chop(5);
++    }
++    return path;
++}
++
 +QPair<QString, QString> OpenSubSonicApiClient::generateAuthToken() const {
 +    const QString salt = generateRandomSalt();
++    const QByteArray data = (m_config.password + salt).toUtf8();
++    const QString token = QString::fromLatin1(
++            QCryptographicHash::hash(data, QCryptographicHash::Md5).toHex());
++    return {token, salt};
++}
++
++QPair<QString, QString> OpenSubSonicApiClient::generateDeterministicAuthToken() const {
++    const QString salt = QString::fromLatin1(
++            QCryptographicHash::hash(
++                    (m_config.username + m_config.serverUrl.toString()).toUtf8(),
++                    QCryptographicHash::Sha256)
++                    .toHex()
++                    .left(16));
 +    const QByteArray data = (m_config.password + salt).toUtf8();
 +    const QString token = QString::fromLatin1(
 +            QCryptographicHash::hash(data, QCryptographicHash::Md5).toHex());
@@ -139,11 +161,8 @@ index 0000000000..e481141ff9
 +
 +QUrl OpenSubSonicApiClient::buildRequestUrl(const QString& endpoint) const {
 +    QUrl url = m_config.serverUrl;
-+    QString path = url.path();
-+    if (!path.endsWith(QLatin1Char('/'))) {
-+        path.append(QLatin1Char('/'));
-+    }
-+    path.append(QStringLiteral("rest/"));
++    QString path = normalizedPath(url);
++    path.append(QStringLiteral("/rest/"));
 +    path.append(endpoint);
 +    url.setPath(path);
 +    url.setQuery(buildAuthQuery());
@@ -177,6 +196,9 @@ index 0000000000..e481141ff9
 +    if (reply->error() != QNetworkReply::NoError) {
 +        const QString errorMsg = reply->errorString();
 +        kLogger.warning() << "Network error for" << endpoint << ":" << errorMsg;
++        if (endpoint == QStringLiteral("ping")) {
++            emit pingFailed(errorMsg);
++        }
 +        emit requestFailed(endpoint, errorMsg);
 +        return;
 +    }
@@ -188,6 +210,9 @@ index 0000000000..e481141ff9
 +    if (parseError.error != QJsonParseError::NoError) {
 +        const QString errorMsg = QStringLiteral("JSON parse error: ") + parseError.errorString();
 +        kLogger.warning() << errorMsg;
++        if (endpoint == QStringLiteral("ping")) {
++            emit pingFailed(errorMsg);
++        }
 +        emit requestFailed(endpoint, errorMsg);
 +        return;
 +    }
@@ -201,6 +226,9 @@ index 0000000000..e481141ff9
 +        const QString errorMsg = error.value(QStringLiteral("message")).toString(
 +                QStringLiteral("Unknown server error"));
 +        kLogger.warning() << "Server error for" << endpoint << ":" << errorMsg;
++        if (endpoint == QStringLiteral("ping")) {
++            emit pingFailed(errorMsg);
++        }
 +        emit requestFailed(endpoint, errorMsg);
 +        return;
 +    }
@@ -288,8 +316,21 @@ index 0000000000..e481141ff9
 +
 +QUrl OpenSubSonicApiClient::streamUrl(const QString& id,
 +        int maxBitRate, const QString& format) const {
-+    QUrl url = buildRequestUrl(QStringLiteral("stream"));
-+    QUrlQuery query(url.query());
++    QUrl url = m_config.serverUrl;
++    QString path = normalizedPath(url);
++    path.append(QStringLiteral("/rest/stream"));
++    url.setPath(path);
++
++    QUrlQuery query;
++    query.addQueryItem(QStringLiteral("u"), m_config.username);
++    query.addQueryItem(QStringLiteral("v"), m_config.apiVersion);
++    query.addQueryItem(QStringLiteral("c"), m_config.clientName);
++    query.addQueryItem(QStringLiteral("f"), QStringLiteral("json"));
++
++    const auto [token, salt] = generateDeterministicAuthToken();
++    query.addQueryItem(QStringLiteral("t"), token);
++    query.addQueryItem(QStringLiteral("s"), salt);
++
 +    query.addQueryItem(QStringLiteral("id"), id);
 +    if (maxBitRate > 0) {
 +        query.addQueryItem(QStringLiteral("maxBitRate"), QString::number(maxBitRate));
@@ -306,10 +347,10 @@ index 0000000000..e481141ff9
 +} // namespace mixxx
 diff --git a/src/library/opensubsonic/opensubsonicapiclient.h b/src/library/opensubsonic/opensubsonicapiclient.h
 new file mode 100644
-index 0000000000..2ffdc780fb
+index 0000000..0f5ceba
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicapiclient.h
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,95 @@
 +#pragma once
 +
 +#include <QJsonArray>
@@ -326,14 +367,11 @@ index 0000000000..2ffdc780fb
 +namespace library {
 +namespace opensubsonic {
 +
-+/// Configuration for connecting to an OpenSubSonic server
 +struct ServerConfig {
 +    QUrl serverUrl;
 +    QString username;
 +    QString password;
-+    /// Client identifier sent with each request
 +    QString clientName = QStringLiteral("Mixxx");
-+    /// API version to request (OpenSubSonic is compatible with 1.16.1)
 +    QString apiVersion = QStringLiteral("1.16.1");
 +
 +    bool isValid() const {
@@ -341,10 +379,6 @@ index 0000000000..2ffdc780fb
 +    }
 +};
 +
-+/// Lightweight API client for OpenSubSonic/Subsonic REST API.
-+///
-+/// Uses token-based authentication: t=md5(password+salt), s=salt.
-+/// Responses are requested in JSON format (f=json).
 +class OpenSubSonicApiClient : public QObject {
 +    Q_OBJECT
 +
@@ -368,8 +402,6 @@ index 0000000000..2ffdc780fb
 +    void getPlaylists();
 +    void getPlaylist(const QString& id);
 +
-+    /// Returns a fully-authenticated streaming URL for the given track ID.
-+    /// This URL can be passed directly to the audio engine for playback.
 +    QUrl streamUrl(const QString& id, int maxBitRate = 0,
 +            const QString& format = QString()) const;
 +
@@ -399,20 +431,13 @@ index 0000000000..2ffdc780fb
 +    void requestFailed(const QString& endpoint, const QString& errorMessage);
 +
 +  private:
-+    /// Build the base URL with authentication parameters
 +    QUrl buildRequestUrl(const QString& endpoint) const;
-+
-+    /// Add common auth parameters to a query
 +    QUrlQuery buildAuthQuery() const;
-+
-+    /// Generate auth token (md5(password+salt)) and salt
 +    QPair<QString, QString> generateAuthToken() const;
-+
-+    /// Send a GET request to the given URL and connect the reply
++    QPair<QString, QString> generateDeterministicAuthToken() const;
 +    void sendRequest(const QString& endpoint, const QUrlQuery& extraParams = QUrlQuery());
-+
-+    /// Handle the JSON response from the server
 +    void handleResponse(QNetworkReply* reply, const QString& endpoint);
++    static QString normalizedPath(const QUrl& serverUrl);
 +
 +    QNetworkAccessManager* m_pNetworkManager;
 +    ServerConfig m_config;
@@ -423,10 +448,10 @@ index 0000000000..2ffdc780fb
 +} // namespace mixxx
 diff --git a/src/library/opensubsonic/opensubsonicfeature.cpp b/src/library/opensubsonic/opensubsonicfeature.cpp
 new file mode 100644
-index 0000000000..3a1db5a730
+index 0000000..4ab0076
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicfeature.cpp
-@@ -0,0 +1,456 @@
+@@ -0,0 +1,509 @@
 +#include "library/opensubsonic/opensubsonicfeature.h"
 +
 +#include <QJsonArray>
@@ -455,41 +480,49 @@ index 0000000000..3a1db5a730
 +
 +void createDatabaseTables(QSqlDatabase& database) {
 +    QSqlQuery query(database);
-+    query.exec(QStringLiteral(
-+            "CREATE TABLE IF NOT EXISTS opensubsonic_library ("
-+            "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
-+            "    artist TEXT,"
-+            "    title TEXT,"
-+            "    album TEXT,"
-+            "    album_artist TEXT,"
-+            "    year INTEGER,"
-+            "    genre TEXT,"
-+            "    tracknumber TEXT,"
-+            "    location TEXT UNIQUE,"
-+            "    comment TEXT,"
-+            "    duration INTEGER,"
-+            "    bitrate TEXT,"
-+            "    bpm FLOAT,"
-+            "    key TEXT,"
-+            "    rating INTEGER"
-+            ")"));
-+    query.exec(QStringLiteral(
-+            "CREATE TABLE IF NOT EXISTS opensubsonic_playlists ("
-+            "    id INTEGER PRIMARY KEY,"
-+            "    name TEXT UNIQUE"
-+            ")"));
-+    query.exec(QStringLiteral(
-+            "CREATE TABLE IF NOT EXISTS opensubsonic_playlist_tracks ("
-+            "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
-+            "    playlist_id INTEGER REFERENCES opensubsonic_playlists(id),"
-+            "    track_id INTEGER REFERENCES opensubsonic_library(id),"
-+            "    position INTEGER"
-+            ")"));
++    if (!query.exec(QStringLiteral(
++                "CREATE TABLE IF NOT EXISTS opensubsonic_library ("
++                "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
++                "    artist TEXT,"
++                "    title TEXT,"
++                "    album TEXT,"
++                "    album_artist TEXT,"
++                "    year INTEGER,"
++                "    genre TEXT,"
++                "    tracknumber TEXT,"
++                "    location TEXT UNIQUE,"
++                "    comment TEXT,"
++                "    duration INTEGER,"
++                "    bitrate TEXT,"
++                "    bpm FLOAT,"
++                "    key TEXT,"
++                "    rating INTEGER"
++                ")"))) {
++        kLogger.warning() << "Failed to create library table:" << query.lastError();
++    }
++    if (!query.exec(QStringLiteral(
++                "CREATE TABLE IF NOT EXISTS opensubsonic_playlists ("
++                "    id INTEGER PRIMARY KEY,"
++                "    name TEXT UNIQUE"
++                ")"))) {
++        kLogger.warning() << "Failed to create playlists table:" << query.lastError();
++    }
++    if (!query.exec(QStringLiteral(
++                "CREATE TABLE IF NOT EXISTS opensubsonic_playlist_tracks ("
++                "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
++                "    playlist_id INTEGER REFERENCES opensubsonic_playlists(id),"
++                "    track_id INTEGER REFERENCES opensubsonic_library(id),"
++                "    position INTEGER"
++                ")"))) {
++        kLogger.warning() << "Failed to create playlist_tracks table:" << query.lastError();
++    }
 +}
 +
 +void clearTable(QSqlDatabase& database, const QString& tableName) {
 +    QSqlQuery query(database);
-+    query.exec(QStringLiteral("DELETE FROM ") + tableName);
++    if (!query.exec(QStringLiteral("DELETE FROM ") + tableName)) {
++        kLogger.warning() << "Failed to clear table" << tableName << ":" << query.lastError();
++    }
 +}
 +
 +} // anonymous namespace
@@ -499,7 +532,8 @@ index 0000000000..3a1db5a730
 +          m_pSidebarModel(make_parented<TreeItemModel>(this)),
 +          m_pTrackModel(nullptr),
 +          m_pPlaylistModel(nullptr),
-+          m_isActivated(false) {
++          m_isActivated(false),
++          m_pendingArtistAlbumLoads(0) {
 +    QString tableName = kTableLibrary;
 +    QString idColumn = QStringLiteral("id");
 +    QStringList columns = {
@@ -567,7 +601,6 @@ index 0000000000..3a1db5a730
 +    delete m_pPlaylistModel;
 +}
 +
-+// static
 +bool OpenSubSonicFeature::isSupported() {
 +    return true;
 +}
@@ -587,7 +620,6 @@ index 0000000000..3a1db5a730
 +void OpenSubSonicFeature::activate() {
 +    if (!m_isActivated) {
 +        connectToServer();
-+        m_isActivated = true;
 +    }
 +    emit showTrackModel(m_pTrackModel);
 +    emit enableCoverArtDisplay(false);
@@ -600,11 +632,15 @@ index 0000000000..3a1db5a730
 +    }
 +
 +    const QString dataStr = treeItem->getData().toString();
-+    if (dataStr.startsWith(QStringLiteral("playlist:"))) {
++    if (dataStr.startsWith(QStringLiteral("artist:"))) {
++        const QString artistId = dataStr.mid(7);
++        m_pApiClient->getArtist(artistId);
++    } else if (dataStr.startsWith(QStringLiteral("playlist:"))) {
 +        const QString playlistId = dataStr.mid(9);
 +        m_pApiClient->getPlaylist(playlistId);
 +    } else if (dataStr.startsWith(QStringLiteral("album:"))) {
 +        const QString albumId = dataStr.mid(6);
++        m_pendingArtistAlbumLoads = 0;
 +        m_pApiClient->getAlbum(albumId);
 +    } else {
 +        emit showTrackModel(m_pTrackModel);
@@ -649,6 +685,10 @@ index 0000000000..3a1db5a730
 +            this,
 +            &OpenSubSonicFeature::slotArtistsLoaded);
 +    connect(m_pApiClient.get(),
++            &OpenSubSonicApiClient::artistLoaded,
++            this,
++            &OpenSubSonicFeature::slotArtistLoaded);
++    connect(m_pApiClient.get(),
 +            &OpenSubSonicApiClient::albumLoaded,
 +            this,
 +            &OpenSubSonicFeature::slotAlbumLoaded);
@@ -666,6 +706,7 @@ index 0000000000..3a1db5a730
 +
 +void OpenSubSonicFeature::slotPingSucceeded() {
 +    kLogger.info() << "Connected to OpenSubSonic server.";
++    m_isActivated = true;
 +    m_pApiClient->getArtists();
 +    m_pApiClient->getPlaylists();
 +}
@@ -679,11 +720,35 @@ index 0000000000..3a1db5a730
 +    populateSidebarModel();
 +}
 +
-+void OpenSubSonicFeature::slotAlbumLoaded(const QJsonObject& album) {
-+    ScopedTransaction transaction(m_database);
-+    clearTable(m_database, kTableLibrary);
++void OpenSubSonicFeature::slotArtistLoaded(const QJsonObject& artist) {
++    const QJsonArray albums = artist.value(QStringLiteral("album")).toArray();
++    if (albums.isEmpty()) {
++        return;
++    }
 +
-+    const QJsonArray songs = album.value(QStringLiteral("song")).toArray();
++    m_pendingArtistAlbumLoads = albums.size();
++
++    {
++        ScopedTransaction transaction(m_database);
++        clearTable(m_database, kTableLibrary);
++        transaction.commit();
++    }
++
++    for (const QJsonValue& albumVal : albums) {
++        const QJsonObject albumObj = albumVal.toObject();
++        const QString albumId = albumObj.value(QStringLiteral("id")).toString();
++        m_pApiClient->getAlbum(albumId);
++    }
++}
++
++void OpenSubSonicFeature::insertTracksFromSongs(
++        const QJsonArray& songs, bool clearFirst) {
++    ScopedTransaction transaction(m_database);
++
++    if (clearFirst) {
++        clearTable(m_database, kTableLibrary);
++    }
++
 +    QSqlQuery query(m_database);
 +    query.prepare(QStringLiteral(
 +            "INSERT OR REPLACE INTO opensubsonic_library "
@@ -728,9 +793,26 @@ index 0000000000..3a1db5a730
 +        }
 +    }
 +    transaction.commit();
++}
 +
-+    m_pTrackModel->select();
-+    emit showTrackModel(m_pTrackModel);
++void OpenSubSonicFeature::slotAlbumLoaded(const QJsonObject& album) {
++    const QJsonArray songs = album.value(QStringLiteral("song")).toArray();
++
++    if (m_pendingArtistAlbumLoads > 0) {
++        insertTracksFromSongs(songs, false);
++        m_pendingArtistAlbumLoads--;
++
++        if (m_pendingArtistAlbumLoads == 0) {
++            m_trackSource->buildIndex();
++            m_pTrackModel->select();
++            emit showTrackModel(m_pTrackModel);
++        }
++    } else {
++        insertTracksFromSongs(songs, true);
++        m_trackSource->buildIndex();
++        m_pTrackModel->select();
++        emit showTrackModel(m_pTrackModel);
++    }
 +}
 +
 +void OpenSubSonicFeature::slotPlaylistsLoaded(const QJsonArray& playlists) {
@@ -754,7 +836,9 @@ index 0000000000..3a1db5a730
 +            "INSERT OR REPLACE INTO opensubsonic_playlists (id, name) VALUES (:id, :name)"));
 +    playlistQuery.bindValue(QStringLiteral(":id"), 1);
 +    playlistQuery.bindValue(QStringLiteral(":name"), playlistName);
-+    playlistQuery.exec();
++    if (!playlistQuery.exec()) {
++        kLogger.warning() << "Failed to insert playlist:" << playlistQuery.lastError();
++    }
 +
 +    QSqlQuery trackQuery(m_database);
 +    trackQuery.prepare(QStringLiteral(
@@ -810,10 +894,14 @@ index 0000000000..3a1db5a730
 +        linkQuery.bindValue(QStringLiteral(":playlist_id"), 1);
 +        linkQuery.bindValue(QStringLiteral(":track_id"), trackId);
 +        linkQuery.bindValue(QStringLiteral(":position"), position++);
-+        linkQuery.exec();
++        if (!linkQuery.exec()) {
++            kLogger.warning() << "Failed to insert playlist link:"
++                              << linkQuery.lastError();
++        }
 +    }
 +    transaction.commit();
 +
++    m_trackSource->buildIndex();
 +    m_pPlaylistModel->setPlaylistById(1);
 +    emit showTrackModel(m_pPlaylistModel);
 +}
@@ -837,11 +925,6 @@ index 0000000000..3a1db5a730
 +    emit featureLoadingFinished(this);
 +}
 +
-+TreeItem* OpenSubSonicFeature::buildArtistTree(const QJsonArray& artistIndex) {
-+    Q_UNUSED(artistIndex);
-+    return nullptr;
-+}
-+
 +void OpenSubSonicFeature::buildArtistTree(
 +        TreeItem* pParent, const QJsonArray& artistIndex) {
 +    for (const QJsonValue& indexVal : artistIndex) {
@@ -854,11 +937,6 @@ index 0000000000..3a1db5a730
 +            pParent->appendChild(name, QVariant(QStringLiteral("artist:") + id));
 +        }
 +    }
-+}
-+
-+TreeItem* OpenSubSonicFeature::buildPlaylistTree(const QJsonArray& playlists) {
-+    Q_UNUSED(playlists);
-+    return nullptr;
 +}
 +
 +void OpenSubSonicFeature::buildPlaylistTree(
@@ -885,14 +963,12 @@ index 0000000000..3a1db5a730
 +}
 diff --git a/src/library/opensubsonic/opensubsonicfeature.h b/src/library/opensubsonic/opensubsonicfeature.h
 new file mode 100644
-index 0000000000..e054e69dc4
+index 0000000..e040e28
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicfeature.h
 @@ -0,0 +1,69 @@
 +#pragma once
 +
-+#include <QFuture>
-+#include <QFutureWatcher>
 +#include <QJsonArray>
 +#include <QJsonObject>
 +#include <QNetworkAccessManager>
@@ -930,6 +1006,7 @@ index 0000000000..e054e69dc4
 +    void slotPingSucceeded();
 +    void slotPingFailed(const QString& errorMessage);
 +    void slotArtistsLoaded(const QJsonArray& artists);
++    void slotArtistLoaded(const QJsonObject& artist);
 +    void slotAlbumLoaded(const QJsonObject& album);
 +    void slotPlaylistsLoaded(const QJsonArray& playlists);
 +    void slotPlaylistLoaded(const QJsonObject& playlist);
@@ -937,10 +1014,9 @@ index 0000000000..e054e69dc4
 +  private:
 +    void connectToServer();
 +    void populateSidebarModel();
-+    TreeItem* buildArtistTree(const QJsonArray& artistIndex);
 +    void buildArtistTree(TreeItem* pParent, const QJsonArray& artistIndex);
-+    TreeItem* buildPlaylistTree(const QJsonArray& playlists);
 +    void buildPlaylistTree(TreeItem* pParent, const QJsonArray& playlists);
++    void insertTracksFromSongs(const QJsonArray& songs, bool clearFirst);
 +
 +    std::unique_ptr<BaseSqlTableModel> createPlaylistModelForPlaylist(
 +            const QVariant& data) override;
@@ -957,6 +1033,8 @@ index 0000000000..e054e69dc4
 +    bool m_isActivated;
 +    QJsonArray m_cachedArtists;
 +    QJsonArray m_cachedPlaylists;
++
++    int m_pendingArtistAlbumLoads;
 +};
 -- 
 2.53.0
