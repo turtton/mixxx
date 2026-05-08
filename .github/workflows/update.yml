@@ -1,0 +1,50 @@
+name: Check Upstream Updates
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for new upstream release
+        id: check
+        run: |
+          CURRENT_VERSION="$(cat .upstream-version | tr -d '[:space:]')"
+          LATEST_TAG=$(gh api repos/mixxxdj/mixxx/releases/latest --jq '.tag_name')
+          echo "current=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$CURRENT_VERSION" != "$LATEST_TAG" ]]; then
+            echo "update_available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "update_available=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create update branch and PR
+        if: steps.check.outputs.update_available == 'true'
+        run: |
+          NEW_VERSION="${{ steps.check.outputs.latest }}"
+          BRANCH="update/upstream-${NEW_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          echo "$NEW_VERSION" > .upstream-version
+          git add .upstream-version
+          git commit -m "chore: update upstream to $NEW_VERSION"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "Update upstream to $NEW_VERSION" \
+            --body "New upstream release detected: $NEW_VERSION (was: ${{ steps.check.outputs.current }})" \
+            --base main \
+            --head "$BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

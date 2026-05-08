@@ -1,0 +1,9 @@
+# Upstream source (fetched at build/dev time)
+.upstream/
+
+# Build artifacts
+result
+result-*
+
+# Nix
+.direnv/
