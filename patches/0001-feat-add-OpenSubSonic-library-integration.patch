@@ -1,24 +1,16 @@
-From 26fbe5927d8e09ba3f6fd0c19948f9d666e0634c Mon Sep 17 00:00:00 2001
+From 20d7bbe63668cf7dd8952dc061af7d0e078580b6 Mon Sep 17 00:00:00 2001
 From: turtton <top.gear7509@turtton.net>
-Date: Fri, 8 May 2026 15:22:17 +0900
+Date: Fri, 8 May 2026 15:50:17 +0900
 Subject: [PATCH] feat: add OpenSubSonic library integration
 
-Implement OpenSubSonic/Subsonic REST API client and LibraryFeature
-for streaming music from self-hosted servers (Navidrome, etc.).
-
-- API client with token-based auth (md5(password+salt))
-- Browse artists, albums, playlists from server
-- Stream tracks via deterministic authenticated URLs
-- Sidebar tree with Artists/Playlists hierarchy
-- Artists tree fully functional with album loading
 ---
  CMakeLists.txt                                |   2 +
  src/library/library.cpp                       |   7 +
- .../opensubsonic/opensubsonicapiclient.cpp    | 277 ++++++++++
+ .../opensubsonic/opensubsonicapiclient.cpp    | 277 +++++++++
  .../opensubsonic/opensubsonicapiclient.h      |  95 ++++
- .../opensubsonic/opensubsonicfeature.cpp      | 509 ++++++++++++++++++
- .../opensubsonic/opensubsonicfeature.h        |  69 +++
- 6 files changed, 959 insertions(+)
+ .../opensubsonic/opensubsonicfeature.cpp      | 532 ++++++++++++++++++
+ .../opensubsonic/opensubsonicfeature.h        |  71 +++
+ 6 files changed, 984 insertions(+)
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.cpp
  create mode 100644 src/library/opensubsonic/opensubsonicapiclient.h
  create mode 100644 src/library/opensubsonic/opensubsonicfeature.cpp
@@ -64,7 +56,7 @@ index 3a17c06..af938be 100644
          if (feature) {
 diff --git a/src/library/opensubsonic/opensubsonicapiclient.cpp b/src/library/opensubsonic/opensubsonicapiclient.cpp
 new file mode 100644
-index 0000000..b325e90
+index 0000000..9111631
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicapiclient.cpp
 @@ -0,0 +1,277 @@
@@ -181,7 +173,7 @@ index 0000000..b325e90
 +        url.setQuery(query);
 +    }
 +
-+    kLogger.debug() << "Sending request to:" << url.toString(QUrl::RemovePassword);
++    kLogger.debug() << "Sending request to:" << url.toString(QUrl::RemoveQuery);
 +
 +    QNetworkReply* reply = m_pNetworkManager->get(QNetworkRequest(url));
 +    connect(reply, &QNetworkReply::finished, this, [this, reply, endpoint]() {
@@ -448,10 +440,10 @@ index 0000000..0f5ceba
 +} // namespace mixxx
 diff --git a/src/library/opensubsonic/opensubsonicfeature.cpp b/src/library/opensubsonic/opensubsonicfeature.cpp
 new file mode 100644
-index 0000000..4ab0076
+index 0000000..00d31f3
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicfeature.cpp
-@@ -0,0 +1,509 @@
+@@ -0,0 +1,532 @@
 +#include "library/opensubsonic/opensubsonicfeature.h"
 +
 +#include <QJsonArray>
@@ -631,18 +623,27 @@ index 0000000..4ab0076
 +        return;
 +    }
 +
++    m_pendingArtistAlbumLoads = 0;
++
 +    const QString dataStr = treeItem->getData().toString();
 +    if (dataStr.startsWith(QStringLiteral("artist:"))) {
 +        const QString artistId = dataStr.mid(7);
++        m_activeViewType = QStringLiteral("artist");
++        m_activeViewId = artistId;
 +        m_pApiClient->getArtist(artistId);
 +    } else if (dataStr.startsWith(QStringLiteral("playlist:"))) {
 +        const QString playlistId = dataStr.mid(9);
++        m_activeViewType = QStringLiteral("playlist");
++        m_activeViewId = playlistId;
 +        m_pApiClient->getPlaylist(playlistId);
 +    } else if (dataStr.startsWith(QStringLiteral("album:"))) {
 +        const QString albumId = dataStr.mid(6);
-+        m_pendingArtistAlbumLoads = 0;
++        m_activeViewType = QStringLiteral("album");
++        m_activeViewId = albumId;
 +        m_pApiClient->getAlbum(albumId);
 +    } else {
++        m_activeViewType.clear();
++        m_activeViewId.clear();
 +        emit showTrackModel(m_pTrackModel);
 +    }
 +    emit enableCoverArtDisplay(false);
@@ -721,6 +722,12 @@ index 0000000..4ab0076
 +}
 +
 +void OpenSubSonicFeature::slotArtistLoaded(const QJsonObject& artist) {
++    const QString artistId = artist.value(QStringLiteral("id")).toString();
++    if (m_activeViewType != QStringLiteral("artist") ||
++            m_activeViewId != artistId) {
++        return;
++    }
++
 +    const QJsonArray albums = artist.value(QStringLiteral("album")).toArray();
 +    if (albums.isEmpty()) {
 +        return;
@@ -799,6 +806,9 @@ index 0000000..4ab0076
 +    const QJsonArray songs = album.value(QStringLiteral("song")).toArray();
 +
 +    if (m_pendingArtistAlbumLoads > 0) {
++        if (m_activeViewType != QStringLiteral("artist")) {
++            return;
++        }
 +        insertTracksFromSongs(songs, false);
 +        m_pendingArtistAlbumLoads--;
 +
@@ -808,6 +818,11 @@ index 0000000..4ab0076
 +            emit showTrackModel(m_pTrackModel);
 +        }
 +    } else {
++        const QString albumId = album.value(QStringLiteral("id")).toString();
++        if (m_activeViewType != QStringLiteral("album") ||
++                m_activeViewId != albumId) {
++            return;
++        }
 +        insertTracksFromSongs(songs, true);
 +        m_trackSource->buildIndex();
 +        m_pTrackModel->select();
@@ -822,6 +837,11 @@ index 0000000..4ab0076
 +
 +void OpenSubSonicFeature::slotPlaylistLoaded(const QJsonObject& playlist) {
 +    const QString playlistIdStr = playlist.value(QStringLiteral("id")).toString();
++    if (m_activeViewType != QStringLiteral("playlist") ||
++            m_activeViewId != playlistIdStr) {
++        return;
++    }
++
 +    const QString playlistName = playlist.value(QStringLiteral("name")).toString();
 +    const QJsonArray entries = playlist.value(QStringLiteral("entry")).toArray();
 +
@@ -907,6 +927,8 @@ index 0000000..4ab0076
 +}
 +
 +void OpenSubSonicFeature::populateSidebarModel() {
++    clearLastRightClickedIndex();
++
 +    auto pRootItem = TreeItem::newRoot(this);
 +
 +    if (!m_cachedArtists.isEmpty()) {
@@ -952,21 +974,14 @@ index 0000000..4ab0076
 +std::unique_ptr<BaseSqlTableModel>
 +OpenSubSonicFeature::createPlaylistModelForPlaylist(const QVariant& data) {
 +    Q_UNUSED(data);
-+    auto pModel = std::make_unique<BaseExternalPlaylistModel>(this,
-+            m_pLibrary->trackCollectionManager(),
-+            "mixxx.db.model.opensubsonic_playlist",
-+            kTablePlaylists,
-+            kTablePlaylistTracks,
-+            m_trackSource);
-+    pModel->setPlaylistById(1);
-+    return pModel;
++    return nullptr;
 +}
 diff --git a/src/library/opensubsonic/opensubsonicfeature.h b/src/library/opensubsonic/opensubsonicfeature.h
 new file mode 100644
-index 0000000..e040e28
+index 0000000..30feb97
 --- /dev/null
 +++ b/src/library/opensubsonic/opensubsonicfeature.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,71 @@
 +#pragma once
 +
 +#include <QJsonArray>
@@ -1034,6 +1049,8 @@ index 0000000..e040e28
 +    QJsonArray m_cachedArtists;
 +    QJsonArray m_cachedPlaylists;
 +
++    QString m_activeViewType;
++    QString m_activeViewId;
 +    int m_pendingArtistAlbumLoads;
 +};
 -- 

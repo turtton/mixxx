@@ -14,6 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
       - name: Check for new upstream release
         id: check
         run: |
@@ -34,11 +36,23 @@ jobs:
         run: |
           NEW_VERSION="${{ steps.check.outputs.latest }}"
           BRANCH="update/upstream-${NEW_VERSION}"
+
+          if gh pr list --head "$BRANCH" --json number --jq '.[0].number' | grep -q .; then
+            echo "PR already exists for $BRANCH"
+            exit 0
+          fi
+
+          NEW_HASH=$(nix-prefetch-url --unpack --type sha256 \
+            "https://github.com/mixxxdj/mixxx/archive/refs/tags/${NEW_VERSION}.tar.gz" 2>/dev/null)
+          NEW_HASH_SRI=$(nix hash convert --to sri --hash-algo sha256 "$NEW_HASH")
+
+          sed -i "s|hash = \"sha256-[^\"]*\"|hash = \"${NEW_HASH_SRI}\"|" flake.nix
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           echo "$NEW_VERSION" > .upstream-version
-          git add .upstream-version
+          git add .upstream-version flake.nix
           git commit -m "chore: update upstream to $NEW_VERSION"
           git push origin "$BRANCH"
           gh pr create \
